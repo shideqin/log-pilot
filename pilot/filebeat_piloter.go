@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/elastic/go-ucfg"
 	"github.com/elastic/go-ucfg/yaml"
 	log "github.com/sirupsen/logrus"
 	"os"
