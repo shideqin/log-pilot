@@ -4,7 +4,6 @@ import (
 	"flag"
 	"github.com/shideqin/log-pilot/pilot"
 	log "github.com/sirupsen/logrus"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
@@ -36,7 +35,7 @@ func main() {
 	}
 	log.SetLevel(logLevel)
 
-	b, err := ioutil.ReadFile(*template)
+	b, err := os.ReadFile(*template)
 	if err != nil {
 		panic(err)
 	}
