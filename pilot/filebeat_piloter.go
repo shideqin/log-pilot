@@ -2,11 +2,10 @@ package pilot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	log "github.com/Sirupsen/logrus"
-	"github.com/elastic/go-ucfg"
 	"github.com/elastic/go-ucfg/yaml"
-	"io/ioutil"
+	log "github.com/sirupsen/logrus"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,7 +46,7 @@ func NewFilebeatPiloter(baseDir string) (Piloter, error) {
 		name:           PILOT_FILEBEAT,
 		baseDir:        baseDir,
 		watchDone:      make(chan bool),
-		watchContainer: make(map[string]string, 0),
+		watchContainer: make(map[string]string),
 		watchDuration:  60 * time.Second,
 	}, nil
 }
@@ -171,8 +170,8 @@ func (p *FilebeatPiloter) loadConfig(container string) (*Config, error) {
 }
 
 func (p *FilebeatPiloter) loadConfigPaths() map[string]string {
-	paths := make(map[string]string, 0)
-	confs, _ := ioutil.ReadDir(p.GetConfHome())
+	paths := make(map[string]string)
+	confs, _ := os.ReadDir(p.GetConfHome())
 	for _, conf := range confs {
 		container := strings.TrimRight(conf.Name(), ".yml")
 		if _, ok := p.watchContainer[container]; ok {
@@ -218,7 +217,7 @@ func (p *FilebeatPiloter) getRegsitryState() (map[string]RegistryState, error) {
 		return nil, err
 	}
 
-	statesMap := make(map[string]RegistryState, 0)
+	statesMap := make(map[string]RegistryState)
 	for _, state := range states {
 		if _, ok := statesMap[state.Source]; !ok {
 			statesMap[state.Source] = state
@@ -257,7 +256,8 @@ func (p *FilebeatPiloter) Start() error {
 		err := filebeat.Wait()
 		if err != nil {
 			log.Errorf("filebeat exited: %v", err)
-			if exitError, ok := err.(*exec.ExitError); ok {
+			var exitError *exec.ExitError
+			if errors.As(err, &exitError) {
 				processState := exitError.ProcessState
 				log.Errorf("filebeat exited pid: %v", processState.Pid())
 			}

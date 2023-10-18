@@ -1,13 +1,13 @@
 package pilot
 
 import (
-	"io/ioutil"
+	"os"
 	"strings"
 )
 
 // ReadFile return string list separated by separator
 func ReadFile(path string, separator string) ([]string, error) {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}

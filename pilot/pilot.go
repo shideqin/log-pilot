@@ -2,9 +2,9 @@ package pilot
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,12 +14,12 @@ import (
 	"text/template"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
 	k8s "github.com/docker/docker/client"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -84,7 +84,7 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 		os.Setenv("DOCKER_API_VERSION", "1.23")
 	}
 
-	client, err := k8s.NewEnvClient()
+	client, err := k8s.NewClientWithOpts()
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func (p *Pilot) watch() error {
 				}
 			case err := <-errs:
 				log.Warnf("error: %v", err)
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
+				if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
 					return
 				}
 				msgs, errs = p.client.Events(ctx, options)
@@ -231,7 +231,7 @@ func (p *Pilot) processAllContainers() error {
 		return nil
 	}
 
-	containerIDs := make(map[string]string, 0)
+	containerIDs := make(map[string]string)
 	for _, c := range containers {
 		if _, ok := containerIDs[c.ID]; !ok {
 			containerIDs[c.ID] = c.ID
@@ -271,7 +271,7 @@ func (p *Pilot) processSymlink(existingContainerIDs map[string]string) error {
 }
 
 func (p *Pilot) listAllSymlinkContainer() map[string]string {
-	containerIDs := make(map[string]string, 0)
+	containerIDs := make(map[string]string)
 	linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
 	if _, err := os.Stat(linkBaseDir); err != nil && os.IsNotExist(err) {
 		return containerIDs
@@ -300,7 +300,7 @@ func listSubDirectory(path string) []string {
 		return subdirs
 	}
 
-	files, err := ioutil.ReadDir(path)
+	files, err := os.ReadDir(path)
 	if err != nil {
 		log.Warnf("read %s error: %v", path, err)
 		return subdirs
@@ -398,7 +398,7 @@ func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 	}
 	//TODO validate config before save
 	//log.Debugf("container %s log config: %s", id, logConfig)
-	if err = ioutil.WriteFile(p.piloter.GetConfPath(id), []byte(logConfig), os.FileMode(0644)); err != nil {
+	if err = os.WriteFile(p.piloter.GetConfPath(id), []byte(logConfig), 0644); err != nil {
 		return err
 	}
 
@@ -545,8 +545,8 @@ func (p *Pilot) tryCheckKafkaTopic(topic string) error {
 }
 
 func (p *Pilot) parseLogConfig(name string, info *LogInfoNode, jsonLogPath string, mounts map[string]types.MountPoint) (*LogConfig, error) {
-	path := strings.TrimSpace(info.value)
-	if path == "" {
+	pathStr := strings.TrimSpace(info.value)
+	if pathStr == "" {
 		return nil, fmt.Errorf("path for %s is empty", name)
 	}
 
@@ -595,7 +595,7 @@ func (p *Pilot) parseLogConfig(name string, info *LogInfoNode, jsonLogPath strin
 		delete(formatConfig, "pattern")
 	}
 
-	if path == "stdout" {
+	if pathStr == "stdout" {
 		logFile := filepath.Base(jsonLogPath)
 		if p.piloter.Name() == PILOT_FILEBEAT {
 			logFile = logFile + "*"
@@ -614,19 +614,19 @@ func (p *Pilot) parseLogConfig(name string, info *LogInfoNode, jsonLogPath strin
 		}, nil
 	}
 
-	if !filepath.IsAbs(path) {
-		return nil, fmt.Errorf("%s must be absolute path, for %s", path, name)
+	if !filepath.IsAbs(pathStr) {
+		return nil, fmt.Errorf("%s must be absolute path, for %s", pathStr, name)
 	}
 
-	containerDir := filepath.Dir(path)
-	file := filepath.Base(path)
+	containerDir := filepath.Dir(pathStr)
+	file := filepath.Base(pathStr)
 	if file == "" {
-		return nil, fmt.Errorf("%s must be a file path, not directory, for %s", path, name)
+		return nil, fmt.Errorf("%s must be a file path, not directory, for %s", pathStr, name)
 	}
 
 	hostDir := p.hostDirOf(containerDir, mounts)
 	if hostDir == "" {
-		return nil, fmt.Errorf("in log %s: %s is not mount on host", name, path)
+		return nil, fmt.Errorf("in log %s: %s is not mount on host", name, pathStr)
 	}
 
 	cfg := &LogConfig{
@@ -667,7 +667,7 @@ func (node *LogInfoNode) insert(keys []string, value string) error {
 	key := keys[0]
 	if len(keys) > 1 {
 		if child, ok := node.children[key]; ok {
-			child.insert(keys[1:], value)
+			_ = child.insert(keys[1:], value)
 		} else {
 			return fmt.Errorf("%s has no parent node", key)
 		}
@@ -689,8 +689,8 @@ func (p *Pilot) getLogConfigs(jsonLogPath string, mounts []types.MountPoint, lab
 	var ret []*LogConfig
 
 	mountsMap := make(map[string]types.MountPoint)
-	for _, mount := range mounts {
-		mountsMap[mount.Destination] = mount
+	for _, m := range mounts {
+		mountsMap[m.Destination] = m
 	}
 
 	var labelNames []string
@@ -762,13 +762,13 @@ func (p *Pilot) render(containerId string, container map[string]string, configLi
 	}
 
 	var buf bytes.Buffer
-	context := map[string]interface{}{
+	contexts := map[string]interface{}{
 		"containerId": containerId,
 		"configList":  configList,
 		"container":   container,
 		"output":      output,
 	}
-	if err := p.templ.Execute(&buf, context); err != nil {
+	if err := p.templ.Execute(&buf, contexts); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
@@ -803,7 +803,7 @@ func (p *Pilot) createVolumeSymlink(containerJSON *types.ContainerJSON) error {
 	applicationInfo := container(containerJSON)
 	containerLinkBaseDir := path.Join(linkBaseDir, applicationInfo["docker_app"],
 		applicationInfo["docker_service"], containerJSON.ID)
-	symlinks := make(map[string]string, 0)
+	symlinks := make(map[string]string)
 	for _, mountPoint := range containerJSON.Mounts {
 		if mountPoint.Type != mount.TypeVolume {
 			continue

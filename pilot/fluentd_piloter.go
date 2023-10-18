@@ -1,8 +1,9 @@
 package pilot
 
 import (
+	"errors"
 	"fmt"
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"os"
 	"os/exec"
 	"strconv"
@@ -67,7 +68,8 @@ func (p *FluentdPiloter) Start() error {
 		err := fluentd.Wait()
 		if err != nil {
 			log.Errorf("fluentd exited: %v", err)
-			if exitError, ok := err.(*exec.ExitError); ok {
+			var exitError *exec.ExitError
+			if errors.As(err, &exitError) {
 				processState := exitError.ProcessState
 				log.Errorf("fluentd exited pid: %v", processState.Pid())
 			}
