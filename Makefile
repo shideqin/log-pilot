@@ -15,7 +15,7 @@ ifndef GIT_COMMIT
   GIT_COMMIT := git-$(shell git rev-parse --short HEAD)
 endif
 
-PKG = github.com/AliyunContainerService/log-pilot
+PKG = github.com/shideqin/log-pilot
 
 ARCH ?= $(shell go env GOARCH)
 GOARCH = ${ARCH}

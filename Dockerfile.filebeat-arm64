@@ -1,6 +1,6 @@
-FROM golang:1.9-alpine3.6 as builder
+FROM golang:1.20-alpine3.18 as builder
 
-ENV PILOT_DIR /go/src/github.com/AliyunContainerService/log-pilot
+ENV PILOT_DIR /go/src/github.com/shideqin/log-pilot
 ARG GOOS=linux
 ARG GOARCH=arm64
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
@@ -9,7 +9,7 @@ WORKDIR $PILOT_DIR
 COPY . $PILOT_DIR
 RUN go install
 
-FROM alpine:3.6
+FROM alpine:3.18
 
 # 注意alpine mul libc 与 gnc libc
 ENV FILEBEAT_VERSION=6.1.1-3
