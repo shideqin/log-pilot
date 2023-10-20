@@ -7,23 +7,23 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
     set -ex && apk add --no-cache make git gcc g++
 WORKDIR $PILOT_DIR
 COPY . $PILOT_DIR
-RUN go install
+RUN go env -w GOPROXY=https://proxy.golang.com.cn,direct \
+  && go install
 
 # 注意alpine mul libc 与 gnc libc
-FROM alpine:3.18
+FROM alpine:3.17
+
 COPY assets/glibc/arm64/glibc-2.23-r3.apk /tmp/
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
     apk update && \ 
-    apk add python && \
+    apk add python3 && \
     apk add ruby-json ruby-irb && \
     apk add build-base ruby-dev && \
-    apk add python && \
     apk add lsof && \
     apk add ca-certificates wget && \
     gem install fluentd -v 1.2.6 --no-ri --no-rdoc && \
     gem install fluent-plugin-elasticsearch -v ">=2.0.0" --no-ri --no-rdoc && \
     gem install gelf -v "~> 3.0.0" --no-ri --no-rdoc && \
-    gem install aliyun_sls_sdk -v ">=0.0.9" --no-ri --no-rdoc && \
     gem install remote_syslog_logger -v ">=1.0.1" --no-ri --no-rdoc && \
     gem install fluent-plugin-remote_syslog -v ">=0.2.1" --no-ri --no-rdoc && \
     gem install fluent-plugin-kafka --no-ri --no-rdoc && \
