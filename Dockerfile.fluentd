@@ -11,6 +11,9 @@ RUN go env -w GOPROXY=https://proxy.golang.com.cn,direct \
 
 FROM alpine:3.17
 
+ENV PILOT_DIR /go/src/github.com/shideqin/log-pilot
+COPY . $PILOT_DIR
+
 COPY assets/glibc/glibc-2.26-r0.apk /tmp/
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
     apk update && \
@@ -28,9 +31,9 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
     gem install fluent-plugin-flowcounter --no-document && \
     apk del build-base ruby-dev && \
     rm -rf /root/.gem && \
-    apk add curl openssl && \
-    apk add --allow-untrusted /tmp/glibc-2.26-r0.apk && \
-    rm -rf /tmp/glibc-2.26-r0.apk
+    apk add curl openssl
+    #apk add --allow-untrusted /tmp/glibc-2.26-r0.apk && \
+    #rm -rf /tmp/glibc-2.26-r0.apk
 
 COPY --from=builder /go/bin/log-pilot /pilot/pilot
 COPY assets/entrypoint assets/fluentd/ assets/healthz /pilot/

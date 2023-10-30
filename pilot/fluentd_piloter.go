@@ -53,10 +53,7 @@ func (p *FluentdPiloter) Start() error {
 		worker = "1"
 	}
 
-	fluentd = exec.Command(FLUENTD_EXEC_CMD,
-		"-c", FLUENTD_CONF_FILE,
-		"-p", FLUENTD_PLUGINS,
-		"--workers", worker)
+	fluentd = exec.Command(FLUENTD_EXEC_CMD, "-c", FLUENTD_CONF_FILE, "-p", FLUENTD_PLUGINS, "--workers", worker)
 	fluentd.Stderr = os.Stderr
 	fluentd.Stdout = os.Stdout
 	err := fluentd.Start()

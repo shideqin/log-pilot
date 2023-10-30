@@ -16,8 +16,8 @@ def umount(volume):
 
 
 def mount_points():
-    with open('/proc/self/mountinfo', 'r') as f:
-        mounts = f.read().decode('utf-8')
+    with open('/proc/self/mountinfo', 'r', encoding='utf8') as f:
+        mounts = f.read()
 
     points = set()
     for line in mounts.split('\n'):
@@ -47,10 +47,10 @@ def run():
 def config():
     pilot_type = os.environ.get(ENV_PILOT_TYPE)
     if pilot_filebeat == pilot_type:
-        print "start log-pilot:", pilot_filebeat
+        print("start log-pilot:", pilot_filebeat)
         subprocess.check_call(['/pilot/config.filebeat'])
     else:
-        print "start log-pilot:", pilot_fluentd
+        print("start log-pilot:", pilot_fluentd)
         subprocess.check_call(['/pilot/config.fluentd'])
 
 

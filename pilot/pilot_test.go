@@ -1,8 +1,9 @@
 package pilot
 
 import (
-	"github.com/docker/docker/api/types"
 	log "github.com/sirupsen/logrus"
+	"gopkg.in/check.v1"
+	v1 "k8s.io/api/core/v1"
 	"os"
 	"testing"
 )
@@ -23,7 +24,7 @@ func (p *PilotSuite) TestGetLogConfigs(c *check.C) {
 	}
 
 	labels := map[string]string{}
-	configs, err := pilot.getLogConfigs("/path/to/json.log", []types.MountPoint{}, labels)
+	configs, err := pilot.getLogConfigs("/path/to/json.log", []v1.VolumeMount{}, labels)
 	c.Assert(err, check.IsNil)
 	c.Assert(configs, check.HasLen, 0)
 
@@ -35,13 +36,13 @@ func (p *PilotSuite) TestGetLogConfigs(c *check.C) {
 	}
 
 	//no mount
-	configs, err = pilot.getLogConfigs("/path/to/json.log", []types.MountPoint{}, labels)
+	configs, err = pilot.getLogConfigs("/path/to/json.log", []v1.VolumeMount{}, labels)
 	c.Assert(err, check.NotNil)
 
-	mounts := []types.MountPoint{
+	mounts := []v1.VolumeMount{
 		{
-			Source:      "/host",
-			Destination: "/var/log",
+			//Source:      "/host",
+			MountPath: "/var/log",
 		},
 	}
 	configs, err = pilot.getLogConfigs("/path/to/json.log", mounts, labels)

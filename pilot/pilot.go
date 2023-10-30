@@ -2,9 +2,20 @@ package pilot
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+
+	//"github.com/docker/docker/api/types"
+	log "github.com/sirupsen/logrus"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
 	"os"
 	"path"
 	"path/filepath"
@@ -13,14 +24,6 @@ import (
 	"sync"
 	"text/template"
 	"time"
-
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/mount"
-	k8s "github.com/docker/docker/client"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 )
 
 /**
@@ -34,18 +37,21 @@ const (
 	ENV_PILOT_CREATE_SYMLINK = "PILOT_CREATE_SYMLINK"
 	ENV_LOGGING_OUTPUT       = "LOGGING_OUTPUT"
 
-	ENV_SERVICE_LOGS_TEMPL                  = "%s_logs_"
-	ENV_SERVICE_LOGS_CUSTOME_CONFIG_TEMPL   = "%s_logs_custom_config"
-	LABEL_SERVICE_LOGS_TEMPL                = "%s.logs."
-	LABEL_SERVICE_LOGS_CUSTOME_CONFIG_TEMPL = "%s.logs.custom.config"
-	LABEL_PROJECT_SWARM_MODE                = "com.docker.stack.namespace"
-	LABEL_PROJECT                           = "com.docker.compose.project"
-	LABEL_SERVICE                           = "com.docker.compose.service"
-	LABEL_SERVICE_SWARM_MODE                = "com.docker.swarm.service.name"
-	LABEL_K8S_POD_NAMESPACE                 = "io.kubernetes.pod.namespace"
-	LABEL_K8S_CONTAINER_NAME                = "io.kubernetes.container.name"
-	LABEL_POD                               = "io.kubernetes.pod.name"
-	SYMLINK_LOGS_BASE                       = "/acs/log/"
+	ENV_SERVICE_LOGS_TEMPL                = "%s_logs_"
+	ENV_SERVICE_LOGS_CUSTOME_CONFIG_TEMPL = "%s_logs_custom_config"
+	LABEL_SERVICE_LOGS_TEMPL              = "%s.logs."
+	//LABEL_SERVICE_LOGS_CUSTOME_CONFIG_TEMPL = "%s.logs.custom.config"
+	//LABEL_PROJECT_SWARM_MODE                = "com.docker.stack.namespace"
+	//LABEL_PROJECT                           = "com.docker.compose.project"
+	//LABEL_SERVICE                           = "com.docker.compose.service"
+	//LABEL_SERVICE_SWARM_MODE                = "com.docker.swarm.service.name"
+	LABEL_K8S_POD_NAMESPACE  = "io.kubernetes.pod.namespace"
+	LABEL_K8S_CONTAINER_NAME = "io.kubernetes.container.name"
+	LABEL_POD                = "io.kubernetes.pod.name"
+	//SYMLINK_LOGS_BASE        = "/acs/log/"
+
+	CONTAINERD_ROOTFS_PATH = "/var/run/containerd/io.containerd.runtime.v2.task/k8s.io/"
+	KUBERNETES_LOG_PATH    = "/var/log/pods/"
 
 	ERR_ALREADY_STARTED = "already started"
 )
@@ -55,7 +61,7 @@ type Pilot struct {
 	piloter       Piloter
 	mutex         sync.Mutex
 	templ         *template.Template
-	client        *k8s.Client
+	client        *kubernetes.Clientset
 	lastReload    time.Time
 	reloadChan    chan bool
 	stopChan      chan bool
@@ -80,11 +86,16 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 		return nil, err
 	}
 
-	if os.Getenv("DOCKER_API_VERSION") == "" {
-		os.Setenv("DOCKER_API_VERSION", "1.23")
+	//kubernetes connection
+	kubeconfig := filepath.Join(homedir.HomeDir(), ".kube", "config")
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		config, err = rest.InClusterConfig()
+		if err != nil {
+			return nil, err
+		}
 	}
-
-	client, err := k8s.NewClientWithOpts()
+	client, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -127,13 +138,18 @@ func (p *Pilot) watch() error {
 	go p.doReload()
 
 	ctx := context.Background()
-	filter := filters.NewArgs()
-	filter.Add("type", "container")
-	options := types.EventsOptions{
-		Filters: filter,
+	options := metav1.ListOptions{
+		TypeMeta: metav1.TypeMeta{Kind: "Pod"},
 	}
 
-	msgs, errs := p.client.Events(ctx, options)
+	watcher, err := p.client.CoreV1().Events(v1.NamespaceAll).Watch(ctx, options)
+	if err != nil {
+		log.Warnf("error: %v", err)
+		if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
+			return err
+		}
+	}
+	events := watcher.ResultChan()
 
 	go func() {
 		defer func() {
@@ -145,16 +161,11 @@ func (p *Pilot) watch() error {
 
 		for {
 			select {
-			case msg := <-msgs:
+			case event := <-events:
+				msg := event.Object.(*v1.Event)
 				if err := p.processEvent(msg); err != nil {
 					log.Errorf("fail to process event: %v,  %v", msg, err)
 				}
-			case err := <-errs:
-				log.Warnf("error: %v", err)
-				if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
-					return
-				}
-				msgs, errs = p.client.Events(ctx, options)
 			}
 		}
 	}()
@@ -224,36 +235,32 @@ func (p *Pilot) processAllContainers() error {
 
 	log.Debug("process all container log config")
 
-	opts := types.ContainerListOptions{}
-	containers, err := p.client.ContainerList(context.Background(), opts)
+	opts := metav1.ListOptions{}
+	containers, err := p.client.CoreV1().Pods(v1.NamespaceAll).List(context.Background(), opts)
 	if err != nil {
 		log.Errorf("fail to list container: %v", err)
 		return nil
 	}
 
 	containerIDs := make(map[string]string)
-	for _, c := range containers {
-		if _, ok := containerIDs[c.ID]; !ok {
-			containerIDs[c.ID] = c.ID
-		}
+	for _, pod := range containers.Items {
+		for k, cs := range pod.Status.ContainerStatuses {
+			if _, ok := containerIDs[cs.ContainerID]; !ok {
+				containerIDs[cs.ContainerID] = cs.ContainerID
+			}
 
-		if c.State == "removing" {
-			continue
-		}
+			if pod.Status.Phase != "Running" {
+				continue
+			}
 
-		if p.exists(c.ID) {
-			log.Debugf("%s is already exists", c.ID)
-			continue
-		}
+			if p.exists(cs.ContainerID) {
+				log.Debugf("%s is already exists", cs.ContainerID)
+				continue
+			}
 
-		containerJSON, err := p.client.ContainerInspect(context.Background(), c.ID)
-		if err != nil {
-			log.Errorf("fail to inspect container %s: %v", c.ID, err)
-			continue
-		}
-
-		if err = p.newContainer(&containerJSON); err != nil {
-			log.Errorf("fail to process container %s: %v", containerJSON.Name, err)
+			if err = p.newContainer(pod.Namespace, pod.Name, pod.UID, pod.Spec.Containers[k], cs); err != nil {
+				log.Errorf("fail to process container %s: %v", cs.Name, err)
+			}
 		}
 	}
 
@@ -264,7 +271,7 @@ func (p *Pilot) processSymlink(existingContainerIDs map[string]string) error {
 	symlinkContainerIDs := p.listAllSymlinkContainer()
 	for containerID := range symlinkContainerIDs {
 		if _, ok := existingContainerIDs[containerID]; !ok {
-			p.removeVolumeSymlink(containerID)
+			_ = p.removeVolumeSymlink(containerID)
 		}
 	}
 	return nil
@@ -272,7 +279,8 @@ func (p *Pilot) processSymlink(existingContainerIDs map[string]string) error {
 
 func (p *Pilot) listAllSymlinkContainer() map[string]string {
 	containerIDs := make(map[string]string)
-	linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
+	//linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
+	linkBaseDir := p.baseDir
 	if _, err := os.Stat(linkBaseDir); err != nil && os.IsNotExist(err) {
 		return containerIDs
 	}
@@ -321,29 +329,29 @@ func putIfNotEmpty(store map[string]string, key, value string) {
 	store[key] = value
 }
 
-func container(containerJSON *types.ContainerJSON) map[string]string {
-	labels := containerJSON.Config.Labels
+func container(labels map[string]string) map[string]string {
 	c := make(map[string]string)
-	putIfNotEmpty(c, "docker_app", labels[LABEL_PROJECT])
-	putIfNotEmpty(c, "docker_app", labels[LABEL_PROJECT_SWARM_MODE])
-	putIfNotEmpty(c, "docker_service", labels[LABEL_SERVICE])
-	putIfNotEmpty(c, "docker_service", labels[LABEL_SERVICE_SWARM_MODE])
+	//putIfNotEmpty(c, "docker_app", labels[LABEL_PROJECT])
+	//putIfNotEmpty(c, "docker_app", labels[LABEL_PROJECT_SWARM_MODE])
+	//putIfNotEmpty(c, "docker_service", labels[LABEL_SERVICE])
+	//putIfNotEmpty(c, "docker_service", labels[LABEL_SERVICE_SWARM_MODE])
 	putIfNotEmpty(c, "k8s_pod", labels[LABEL_POD])
 	putIfNotEmpty(c, "k8s_pod_namespace", labels[LABEL_K8S_POD_NAMESPACE])
 	putIfNotEmpty(c, "k8s_container_name", labels[LABEL_K8S_CONTAINER_NAME])
 	putIfNotEmpty(c, "k8s_node_name", os.Getenv("NODE_NAME"))
-	putIfNotEmpty(c, "docker_container", strings.TrimPrefix(containerJSON.Name, "/"))
-	extension(c, containerJSON)
+	putIfNotEmpty(c, "docker_container", strings.TrimPrefix(labels[LABEL_K8S_CONTAINER_NAME], "/"))
+	//extension(c, containerJSON)
 	return c
 }
 
-func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
-	id := containerJSON.ID
-	env := containerJSON.Config.Env
-	mounts := containerJSON.Mounts
-	labels := containerJSON.Config.Labels
-	jsonLogPath := containerJSON.LogPath
-
+func (p *Pilot) newContainer(ns, podName string, podUID types.UID, c v1.Container, cs v1.ContainerStatus) error {
+	env := c.Env
+	mounts := c.VolumeMounts
+	labels := map[string]string{}
+	labels[LABEL_K8S_POD_NAMESPACE] = ns
+	labels[LABEL_POD] = podName
+	labels[LABEL_K8S_CONTAINER_NAME] = c.Name
+	jsonLogPath := fmt.Sprintf("%s%s_%s_%s/%s/%d.log", KUBERNETES_LOG_PATH, ns, podName, podUID, c.Name, cs.RestartCount)
 	//logConfig.containerDir match types.mountPoint
 	/**
 	  场景：
@@ -353,27 +361,24 @@ func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 	  查找：从containerdir开始查找最近的一层挂载
 	*/
 
-	container := container(containerJSON)
+	nContainer := container(labels)
 
 	for _, e := range env {
 		for _, prefix := range p.logPrefix {
 			customConfig := fmt.Sprintf(ENV_SERVICE_LOGS_CUSTOME_CONFIG_TEMPL, prefix)
-			if strings.HasPrefix(e, customConfig) {
-				labels[customConfig] = e[len(customConfig)+1:]
+			if strings.HasPrefix(e.Name, customConfig) {
+				labels[customConfig] = e.Name[len(customConfig)+1:]
 				log.Infof("Get customConfig key = %s, value = %s", customConfig, labels[customConfig])
 				continue
 			}
 
 			serviceLogs := fmt.Sprintf(ENV_SERVICE_LOGS_TEMPL, prefix)
-			if !strings.HasPrefix(e, serviceLogs) {
+			if !strings.HasPrefix(e.Name, serviceLogs) {
 				continue
 			}
 
-			envLabel := strings.SplitN(e, "=", 2)
-			if len(envLabel) == 2 {
-				labelKey := strings.Replace(envLabel[0], "_", ".", -1)
-				labels[labelKey] = envLabel[1]
-			}
+			labelKey := strings.Replace(e.Name, "_", ".", -1)
+			labels[labelKey] = e.Value
 		}
 	}
 
@@ -383,22 +388,23 @@ func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 	}
 
 	if len(logConfigs) == 0 {
-		log.Debugf("%s has not log config, skip", id)
+		log.Debugf("%s has not log config, skip", cs.ContainerID)
 		return nil
 	}
 
 	// create symlink
-	p.createVolumeSymlink(containerJSON)
+	//_ = p.createVolumeSymlink(containerJSON)
+	_ = p.createVolumeSymlink()
 
 	//pilot.findMounts(logConfigs, jsonLogPath, mounts)
 	//生成配置
-	logConfig, err := p.render(id, container, logConfigs)
+	logConfig, err := p.render(cs.ContainerID, nContainer, logConfigs)
 	if err != nil {
 		return err
 	}
 	//TODO validate config before save
 	//log.Debugf("container %s log config: %s", id, logConfig)
-	if err = os.WriteFile(p.piloter.GetConfPath(id), []byte(logConfig), 0644); err != nil {
+	if err = os.WriteFile(p.piloter.GetConfPath(cs.ContainerID), []byte(logConfig), 0644); err != nil {
 		return err
 	}
 
@@ -418,12 +424,12 @@ func (p *Pilot) doReload() {
 	log.Info("Reload goroutine is ready")
 	for {
 		<-p.reloadChan
-		p.reload()
+		_ = p.reload()
 	}
 }
 
 func (p *Pilot) delContainer(id string) error {
-	p.removeVolumeSymlink(id)
+	_ = p.removeVolumeSymlink(id)
 
 	//fixme refactor in the future
 	if p.piloter.Name() == PILOT_FLUENTD {
@@ -442,51 +448,47 @@ func (p *Pilot) delContainer(id string) error {
 	return p.piloter.OnDestroyEvent(id)
 }
 
-func (p *Pilot) processEvent(msg events.Message) error {
-	containerId := msg.Actor.ID
-	ctx := context.Background()
+func (p *Pilot) processEvent(msg *v1.Event) error {
+	switch msg.Reason {
+	case "Started":
+		log.Debugf("Process container start event: %s", msg.InvolvedObject.Name)
 
-	switch msg.Action {
-	case "start", "restart":
-		log.Debugf("Process container start event: %s", containerId)
-
-		if p.exists(containerId) {
-			log.Debugf("%s is already exists", containerId)
+		if p.exists(string(msg.InvolvedObject.UID)) {
+			log.Debugf("%s is already exists", msg.InvolvedObject.UID)
 			return nil
 		}
 
-		containerJSON, err := p.client.ContainerInspect(ctx, containerId)
+		pod, err := p.client.CoreV1().Pods(msg.InvolvedObject.Namespace).Get(context.Background(), msg.InvolvedObject.Name, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
 
-		return p.newContainer(&containerJSON)
+		return p.newContainer(msg.InvolvedObject.Namespace, msg.InvolvedObject.Name, msg.InvolvedObject.UID, pod.Spec.Containers[0], pod.Status.ContainerStatuses[0])
 	//Increase the monitoring of container Exit events and repair the log duplicate collection caused by the failure to delete the exited container in time
-	case "destroy", "die":
-		log.Debugf("Process container destroy event: %s", containerId)
+	case "Killing":
+		log.Debugf("Process container destroy event: %s", msg.InvolvedObject.UID)
 
-		err := p.delContainer(containerId)
+		err := p.delContainer(string(msg.InvolvedObject.UID))
 		if err != nil {
-			log.Warnf("Process container destroy event error: %s, %s",
-				containerId, err.Error())
+			log.Warnf("Process container destroy event error: %s, %s", msg.InvolvedObject.UID, err.Error())
 		}
 	}
 	return nil
 }
 
-func (p *Pilot) hostDirOf(path string, mounts map[string]types.MountPoint) string {
+func (p *Pilot) hostDirOf(path string, mounts map[string]v1.VolumeMount) string {
 	confPath := path
 	for {
 		if point, ok := mounts[path]; ok {
 			if confPath == path {
-				return point.Source
+				return point.MountPath
 			}
 
 			relPath, err := filepath.Rel(path, confPath)
 			if err != nil {
 				panic(err)
 			}
-			return fmt.Sprintf("%s/%s", point.Source, relPath)
+			return fmt.Sprintf("%s/%s", point.MountPath, relPath)
 		}
 		path = filepath.Dir(path)
 		if path == "/" || path == "." {
@@ -544,7 +546,7 @@ func (p *Pilot) tryCheckKafkaTopic(topic string) error {
 	return fmt.Errorf("invalid topic: %s, supported topics: %v", topic, topics)
 }
 
-func (p *Pilot) parseLogConfig(name string, info *LogInfoNode, jsonLogPath string, mounts map[string]types.MountPoint) (*LogConfig, error) {
+func (p *Pilot) parseLogConfig(name string, info *LogInfoNode, jsonLogPath string, mounts map[string]v1.VolumeMount) (*LogConfig, error) {
 	pathStr := strings.TrimSpace(info.value)
 	if pathStr == "" {
 		return nil, fmt.Errorf("path for %s is empty", name)
@@ -685,12 +687,12 @@ func (node *LogInfoNode) get(key string) string {
 	return ""
 }
 
-func (p *Pilot) getLogConfigs(jsonLogPath string, mounts []types.MountPoint, labels map[string]string) ([]*LogConfig, error) {
+func (p *Pilot) getLogConfigs(jsonLogPath string, mounts []v1.VolumeMount, labels map[string]string) ([]*LogConfig, error) {
 	var ret []*LogConfig
 
-	mountsMap := make(map[string]types.MountPoint)
+	mountsMap := make(map[string]v1.VolumeMount)
 	for _, m := range mounts {
-		mountsMap[m.Destination] = m
+		mountsMap[m.MountPath] = m
 	}
 
 	var labelNames []string
@@ -788,56 +790,56 @@ func (p *Pilot) reload() error {
 	return err
 }
 
-func (p *Pilot) createVolumeSymlink(containerJSON *types.ContainerJSON) error {
+// func (p *Pilot) createVolumeSymlink(containerJSON *types.ContainerJSON) error {
+func (p *Pilot) createVolumeSymlink() error {
 	if !p.createSymlink {
 		return nil
 	}
 
-	linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
-	if _, err := os.Stat(linkBaseDir); err != nil && os.IsNotExist(err) {
-		if err := os.MkdirAll(linkBaseDir, 0777); err != nil {
-			log.Errorf("create %s error: %v", linkBaseDir, err)
-		}
-	}
-
-	applicationInfo := container(containerJSON)
-	containerLinkBaseDir := path.Join(linkBaseDir, applicationInfo["docker_app"],
-		applicationInfo["docker_service"], containerJSON.ID)
-	symlinks := make(map[string]string)
-	for _, mountPoint := range containerJSON.Mounts {
-		if mountPoint.Type != mount.TypeVolume {
-			continue
-		}
-
-		volume, err := p.client.VolumeInspect(context.Background(), mountPoint.Name)
-		if err != nil {
-			log.Errorf("inspect volume %s error: %v", mountPoint.Name, err)
-			continue
-		}
-
-		symlink := path.Join(containerLinkBaseDir, volume.Name)
-		if _, ok := symlinks[volume.Mountpoint]; !ok {
-			symlinks[volume.Mountpoint] = symlink
-		}
-	}
-
-	if len(symlinks) == 0 {
-		return nil
-	}
-
-	if _, err := os.Stat(containerLinkBaseDir); err != nil && os.IsNotExist(err) {
-		if err := os.MkdirAll(containerLinkBaseDir, 0777); err != nil {
-			log.Errorf("create %s error: %v", containerLinkBaseDir, err)
-			return err
-		}
-	}
-
-	for mountPoint, symlink := range symlinks {
-		err := os.Symlink(mountPoint, symlink)
-		if err != nil && !os.IsExist(err) {
-			log.Errorf("create symlink %s error: %v", symlink, err)
-		}
-	}
+	//linkBaseDir := path.Join(p.baseDir, CONTAINERD_ROOTFS_PATH)
+	//if _, err := os.Stat(linkBaseDir); err != nil && os.IsNotExist(err) {
+	//	if err := os.MkdirAll(linkBaseDir, 0777); err != nil {
+	//		log.Errorf("create %s error: %v", linkBaseDir, err)
+	//	}
+	//}
+	//
+	//applicationInfo := container(containerJSON)
+	//containerLinkBaseDir := path.Join(linkBaseDir, applicationInfo["docker_app"], applicationInfo["docker_service"], containerJSON.ID)
+	//symlinks := make(map[string]string)
+	//for _, mountPoint := range containerJSON.Mounts {
+	//	if mountPoint.Type != mount.TypeVolume {
+	//		continue
+	//	}
+	//
+	//	volume, err := p.client.VolumeInspect(context.Background(), mountPoint.Name)
+	//	if err != nil {
+	//		log.Errorf("inspect volume %s error: %v", mountPoint.Name, err)
+	//		continue
+	//	}
+	//
+	//	symlink := path.Join(containerLinkBaseDir, volume.Name)
+	//	if _, ok := symlinks[volume.Mountpoint]; !ok {
+	//		symlinks[volume.Mountpoint] = symlink
+	//	}
+	//}
+	//
+	//if len(symlinks) == 0 {
+	//	return nil
+	//}
+	//
+	//if _, err := os.Stat(containerLinkBaseDir); err != nil && os.IsNotExist(err) {
+	//	if err := os.MkdirAll(containerLinkBaseDir, 0777); err != nil {
+	//		log.Errorf("create %s error: %v", containerLinkBaseDir, err)
+	//		return err
+	//	}
+	//}
+	//
+	//for mountPoint, symlink := range symlinks {
+	//	err := os.Symlink(mountPoint, symlink)
+	//	if err != nil && !os.IsExist(err) {
+	//		log.Errorf("create symlink %s error: %v", symlink, err)
+	//	}
+	//}
 	return nil
 }
 
@@ -846,7 +848,8 @@ func (p *Pilot) removeVolumeSymlink(containerId string) error {
 		return nil
 	}
 
-	linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
+	//linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
+	linkBaseDir := p.baseDir
 	containerLinkDirs, _ := filepath.Glob(path.Join(linkBaseDir, "*", "*", containerId))
 	if containerLinkDirs == nil {
 		return nil
