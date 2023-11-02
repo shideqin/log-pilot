@@ -24,7 +24,7 @@ func (p *PilotSuite) TestGetLogConfigs(c *check.C) {
 	}
 
 	labels := map[string]string{}
-	configs, err := pilot.getLogConfigs("/path/to/json.log", []v1.VolumeMount{}, labels)
+	configs, err := pilot.getLogConfigs("0000000", "/path/to/json.log", []v1.VolumeMount{}, labels)
 	c.Assert(err, check.IsNil)
 	c.Assert(configs, check.HasLen, 0)
 
@@ -36,7 +36,7 @@ func (p *PilotSuite) TestGetLogConfigs(c *check.C) {
 	}
 
 	//no mount
-	configs, err = pilot.getLogConfigs("/path/to/json.log", []v1.VolumeMount{}, labels)
+	configs, err = pilot.getLogConfigs("d266fb786fe86f8556fdff2f199fc7e681d607834e9e060a5cad6571c64a43eb", "/path/to/json.log", []v1.VolumeMount{}, labels)
 	c.Assert(err, check.NotNil)
 
 	mounts := []v1.VolumeMount{
@@ -45,7 +45,7 @@ func (p *PilotSuite) TestGetLogConfigs(c *check.C) {
 			MountPath: "/var/log",
 		},
 	}
-	configs, err = pilot.getLogConfigs("/path/to/json.log", mounts, labels)
+	configs, err = pilot.getLogConfigs("d266fb786fe86f8556fdff2f199fc7e681d607834e9e060a5cad6571c64a43eb", "/path/to/json.log", mounts, labels)
 	c.Assert(err, check.IsNil)
 	c.Assert(configs, check.HasLen, 1)
 	c.Assert(configs[0].Format, check.Equals, "json")
@@ -61,7 +61,7 @@ func (p *PilotSuite) TestGetLogConfigs(c *check.C) {
 		"aliyun.logs.hello.tags":           "name=hello,stage=test",
 		"aliyun.logs.hello.format.pattern": "(?=name:hello).*",
 	}
-	configs, err = pilot.getLogConfigs("/path/to/json.log", mounts, labels)
+	configs, err = pilot.getLogConfigs("d266fb786fe86f8556fdff2f199fc7e681d607834e9e060a5cad6571c64a43eb", "/path/to/json.log", mounts, labels)
 	c.Assert(err, check.IsNil)
 	c.Assert(configs[0].Format, check.Equals, "/(?=name:hello).*/")
 }
@@ -72,7 +72,7 @@ func (p *PilotSuite) TestRender(c *check.C) {
 	<source>
 	  @type tail
 	  tag {{ .Name }} {{ $.containerId }}
-	  path {{ .HostDir }}/{{ .File }}
+	  path {{ .HostDir }}{{ .ContainerDir }}/{{ .File }}
 	  pos_file /var/log/fluentd.pos
 	  refresh_interval 5
 	</source>
@@ -81,14 +81,16 @@ func (p *PilotSuite) TestRender(c *check.C) {
 
 	configs := []*LogConfig{
 		{
-			Name:    "hello",
-			HostDir: "/path/to/hello",
-			File:    "hello.log",
+			Name:         "hello",
+			ContainerDir: "/var/log/path",
+			HostDir:      "/path/to/hello",
+			File:         "hello.log",
 		},
 		{
-			Name:    "world",
-			File:    "world.log",
-			HostDir: "/path/to/world",
+			Name:         "world",
+			File:         "world.log",
+			ContainerDir: "/var/log/path",
+			HostDir:      "/path/to/world",
 		},
 	}
 	os.Setenv(ENV_PILOT_TYPE, PILOT_FILEBEAT)

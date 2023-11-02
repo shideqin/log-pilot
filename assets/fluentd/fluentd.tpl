@@ -2,7 +2,7 @@
 <source>
   @type tail
   tag docker.{{ $.containerId }}.{{ .Name }}
-  path {{ .HostDir }}/{{ .File }}
+  path {{ .HostDir }}{{ .ContainerDir }}/{{ .File }}
 
   <parse>
   {{if .Stdout}}

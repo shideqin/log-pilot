@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 
 	//"github.com/docker/docker/api/types"
 	log "github.com/sirupsen/logrus"
@@ -17,7 +18,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -47,8 +47,9 @@ const (
 	//LABEL_SERVICE_SWARM_MODE                = "com.docker.swarm.service.name"
 	LABEL_K8S_POD_NAMESPACE  = "io.kubernetes.pod.namespace"
 	LABEL_K8S_CONTAINER_NAME = "io.kubernetes.container.name"
+	LABEL_POD_UID            = "io.kubernetes.pod.uid"
 	LABEL_POD                = "io.kubernetes.pod.name"
-	//SYMLINK_LOGS_BASE        = "/acs/log/"
+	SYMLINK_LOGS_BASE        = "/acs/log/"
 
 	CONTAINERD_ROOTFS_PATH = "/var/run/containerd/io.containerd.runtime.v2.task/k8s.io/"
 	KUBERNETES_LOG_PATH    = "/var/log/pods/"
@@ -140,6 +141,7 @@ func (p *Pilot) watch() error {
 	ctx := context.Background()
 	options := metav1.ListOptions{
 		TypeMeta: metav1.TypeMeta{Kind: "Pod"},
+		//FieldSelector: "metadata.name=xx",
 	}
 
 	watcher, err := p.client.CoreV1().Events(v1.NamespaceAll).Watch(ctx, options)
@@ -163,7 +165,7 @@ func (p *Pilot) watch() error {
 			select {
 			case event := <-events:
 				msg := event.Object.(*v1.Event)
-				if err := p.processEvent(msg); err != nil {
+				if err = p.processEvent(msg); err != nil {
 					log.Errorf("fail to process event: %v,  %v", msg, err)
 				}
 			}
@@ -196,6 +198,15 @@ type LogConfig struct {
 
 	CustomFields  map[string]string
 	CustomConfigs map[string]string
+}
+
+// PodConfig pod configuration
+type PodConfig struct {
+	Namespace       string
+	PodName         string
+	PodUID          string
+	Container       v1.Container
+	ContainerStatus v1.ContainerStatus
 }
 
 func (p *Pilot) cleanConfigs() error {
@@ -235,36 +246,45 @@ func (p *Pilot) processAllContainers() error {
 
 	log.Debug("process all container log config")
 
-	opts := metav1.ListOptions{}
+	opts := metav1.ListOptions{
+		//FieldSelector: "metadata.name=xx",
+	}
 	containers, err := p.client.CoreV1().Pods(v1.NamespaceAll).List(context.Background(), opts)
 	if err != nil {
 		log.Errorf("fail to list container: %v", err)
 		return nil
 	}
 
-	containerIDs := make(map[string]string)
+	podConfigs := make(map[string]*PodConfig)
 	for _, pod := range containers.Items {
-		for k, cs := range pod.Status.ContainerStatuses {
-			if _, ok := containerIDs[cs.ContainerID]; !ok {
-				containerIDs[cs.ContainerID] = cs.ContainerID
-			}
-
-			if pod.Status.Phase != "Running" {
-				continue
-			}
-
+		if pod.Status.Phase != "Running" {
+			continue
+		}
+		for _, cs := range pod.Status.ContainerStatuses {
+			cs.ContainerID = strings.TrimPrefix(cs.ContainerID, "containerd://")
 			if p.exists(cs.ContainerID) {
 				log.Debugf("%s is already exists", cs.ContainerID)
 				continue
 			}
-
-			if err = p.newContainer(pod.Namespace, pod.Name, pod.UID, pod.Spec.Containers[k], cs); err != nil {
-				log.Errorf("fail to process container %s: %v", cs.Name, err)
+			podConfigs[cs.Name] = &PodConfig{
+				ContainerStatus: cs,
+			}
+		}
+		for _, c := range pod.Spec.Containers {
+			if _, ok := podConfigs[c.Name]; !ok {
+				continue
+			}
+			podConfigs[c.Name].Container = c
+		}
+		for _, podConfig := range podConfigs {
+			if err = p.newContainer(pod.Namespace, pod.Name, pod.UID, podConfig.Container, podConfig.ContainerStatus); err != nil {
+				log.Errorf("fail to process container %s: %v", podConfig.Container.Name, err)
 			}
 		}
 	}
 
-	return p.processSymlink(containerIDs)
+	//return p.processSymlink(containerIDs)
+	return nil
 }
 
 func (p *Pilot) processSymlink(existingContainerIDs map[string]string) error {
@@ -279,8 +299,7 @@ func (p *Pilot) processSymlink(existingContainerIDs map[string]string) error {
 
 func (p *Pilot) listAllSymlinkContainer() map[string]string {
 	containerIDs := make(map[string]string)
-	//linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
-	linkBaseDir := p.baseDir
+	linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
 	if _, err := os.Stat(linkBaseDir); err != nil && os.IsNotExist(err) {
 		return containerIDs
 	}
@@ -339,7 +358,7 @@ func container(labels map[string]string) map[string]string {
 	putIfNotEmpty(c, "k8s_pod_namespace", labels[LABEL_K8S_POD_NAMESPACE])
 	putIfNotEmpty(c, "k8s_container_name", labels[LABEL_K8S_CONTAINER_NAME])
 	putIfNotEmpty(c, "k8s_node_name", os.Getenv("NODE_NAME"))
-	putIfNotEmpty(c, "docker_container", strings.TrimPrefix(labels[LABEL_K8S_CONTAINER_NAME], "/"))
+	putIfNotEmpty(c, "docker_container", fmt.Sprintf("k8s_%s_%s_%s_%s_0", labels[LABEL_K8S_CONTAINER_NAME], labels[LABEL_POD], labels[LABEL_K8S_POD_NAMESPACE], labels[LABEL_POD_UID]))
 	//extension(c, containerJSON)
 	return c
 }
@@ -350,6 +369,7 @@ func (p *Pilot) newContainer(ns, podName string, podUID types.UID, c v1.Containe
 	labels := map[string]string{}
 	labels[LABEL_K8S_POD_NAMESPACE] = ns
 	labels[LABEL_POD] = podName
+	labels[LABEL_POD_UID] = string(podUID)
 	labels[LABEL_K8S_CONTAINER_NAME] = c.Name
 	jsonLogPath := fmt.Sprintf("%s%s_%s_%s/%s/%d.log", KUBERNETES_LOG_PATH, ns, podName, podUID, c.Name, cs.RestartCount)
 	//logConfig.containerDir match types.mountPoint
@@ -360,8 +380,6 @@ func (p *Pilot) newContainer(ns, podName string, podUID types.UID, c v1.Containe
 
 	  查找：从containerdir开始查找最近的一层挂载
 	*/
-
-	nContainer := container(labels)
 
 	for _, e := range env {
 		for _, prefix := range p.logPrefix {
@@ -381,8 +399,7 @@ func (p *Pilot) newContainer(ns, podName string, podUID types.UID, c v1.Containe
 			labels[labelKey] = e.Value
 		}
 	}
-
-	logConfigs, err := p.getLogConfigs(jsonLogPath, mounts, labels)
+	logConfigs, err := p.getLogConfigs(cs.ContainerID, jsonLogPath, mounts, labels)
 	if err != nil {
 		return err
 	}
@@ -393,12 +410,11 @@ func (p *Pilot) newContainer(ns, podName string, podUID types.UID, c v1.Containe
 	}
 
 	// create symlink
-	//_ = p.createVolumeSymlink(containerJSON)
-	_ = p.createVolumeSymlink()
+	//p.createVolumeSymlink(labels)
 
 	//pilot.findMounts(logConfigs, jsonLogPath, mounts)
 	//生成配置
-	logConfig, err := p.render(cs.ContainerID, nContainer, logConfigs)
+	logConfig, err := p.render(cs.ContainerID, container(labels), logConfigs)
 	if err != nil {
 		return err
 	}
@@ -429,7 +445,7 @@ func (p *Pilot) doReload() {
 }
 
 func (p *Pilot) delContainer(id string) error {
-	_ = p.removeVolumeSymlink(id)
+	//p.removeVolumeSymlink(id)
 
 	//fixme refactor in the future
 	if p.piloter.Name() == PILOT_FLUENTD {
@@ -546,7 +562,7 @@ func (p *Pilot) tryCheckKafkaTopic(topic string) error {
 	return fmt.Errorf("invalid topic: %s, supported topics: %v", topic, topics)
 }
 
-func (p *Pilot) parseLogConfig(name string, info *LogInfoNode, jsonLogPath string, mounts map[string]v1.VolumeMount) (*LogConfig, error) {
+func (p *Pilot) parseLogConfig(containerId, name string, info *LogInfoNode, jsonLogPath string, mounts map[string]v1.VolumeMount) (*LogConfig, error) {
 	pathStr := strings.TrimSpace(info.value)
 	if pathStr == "" {
 		return nil, fmt.Errorf("path for %s is empty", name)
@@ -626,10 +642,11 @@ func (p *Pilot) parseLogConfig(name string, info *LogInfoNode, jsonLogPath strin
 		return nil, fmt.Errorf("%s must be a file path, not directory, for %s", pathStr, name)
 	}
 
-	hostDir := p.hostDirOf(containerDir, mounts)
-	if hostDir == "" {
-		return nil, fmt.Errorf("in log %s: %s is not mount on host", name, pathStr)
-	}
+	//hostDir := p.hostDirOf(containerDir, mounts)
+	//if hostDir == "" {
+	//	return nil, fmt.Errorf("in log %s: %s is not mount on host", name, pathStr)
+	//}
+	hostDir := filepath.Join(CONTAINERD_ROOTFS_PATH, containerId, "rootfs")
 
 	cfg := &LogConfig{
 		Name:         name,
@@ -687,7 +704,7 @@ func (node *LogInfoNode) get(key string) string {
 	return ""
 }
 
-func (p *Pilot) getLogConfigs(jsonLogPath string, mounts []v1.VolumeMount, labels map[string]string) ([]*LogConfig, error) {
+func (p *Pilot) getLogConfigs(containerId, jsonLogPath string, mounts []v1.VolumeMount, labels map[string]string) ([]*LogConfig, error) {
 	var ret []*LogConfig
 
 	mountsMap := make(map[string]v1.VolumeMount)
@@ -733,7 +750,7 @@ func (p *Pilot) getLogConfigs(jsonLogPath string, mounts []v1.VolumeMount, label
 	}
 
 	for name, node := range root.children {
-		logConfig, err := p.parseLogConfig(name, node, jsonLogPath, mountsMap)
+		logConfig, err := p.parseLogConfig(containerId, name, node, jsonLogPath, mountsMap)
 		if err != nil {
 			return nil, err
 		}
@@ -790,20 +807,19 @@ func (p *Pilot) reload() error {
 	return err
 }
 
-// func (p *Pilot) createVolumeSymlink(containerJSON *types.ContainerJSON) error {
-func (p *Pilot) createVolumeSymlink() error {
+func (p *Pilot) createVolumeSymlink(labels map[string]string) error {
 	if !p.createSymlink {
 		return nil
 	}
 
-	//linkBaseDir := path.Join(p.baseDir, CONTAINERD_ROOTFS_PATH)
+	//linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
 	//if _, err := os.Stat(linkBaseDir); err != nil && os.IsNotExist(err) {
 	//	if err := os.MkdirAll(linkBaseDir, 0777); err != nil {
 	//		log.Errorf("create %s error: %v", linkBaseDir, err)
 	//	}
 	//}
 	//
-	//applicationInfo := container(containerJSON)
+	//applicationInfo := container(labels)
 	//containerLinkBaseDir := path.Join(linkBaseDir, applicationInfo["docker_app"], applicationInfo["docker_service"], containerJSON.ID)
 	//symlinks := make(map[string]string)
 	//for _, mountPoint := range containerJSON.Mounts {
@@ -849,15 +865,14 @@ func (p *Pilot) removeVolumeSymlink(containerId string) error {
 	}
 
 	//linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
-	linkBaseDir := p.baseDir
-	containerLinkDirs, _ := filepath.Glob(path.Join(linkBaseDir, "*", "*", containerId))
-	if containerLinkDirs == nil {
-		return nil
-	}
-	for _, containerLinkDir := range containerLinkDirs {
-		if err := os.RemoveAll(containerLinkDir); err != nil {
-			log.Warnf("remove error: %v", err)
-		}
-	}
+	//containerLinkDirs, _ := filepath.Glob(path.Join(linkBaseDir, "*", "*", containerId))
+	//if containerLinkDirs == nil {
+	//	return nil
+	//}
+	//for _, containerLinkDir := range containerLinkDirs {
+	//	if err := os.RemoveAll(containerLinkDir); err != nil {
+	//		log.Warnf("remove error: %v", err)
+	//	}
+	//}
 	return nil
 }
