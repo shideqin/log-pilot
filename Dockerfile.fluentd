@@ -47,4 +47,4 @@ VOLUME /etc/fluentd/conf.d
 VOLUME /pilot/pos
 WORKDIR /pilot/
 ENV PILOT_TYPE=fluentd
-ENTRYPOINT ["/pilot/entrypoint"]
+CMD ["/pilot/entrypoint"]
