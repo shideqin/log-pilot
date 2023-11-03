@@ -164,10 +164,13 @@ func (p *Pilot) watch() error {
 		for {
 			select {
 			case event := <-events:
-				msg := event.Object.(*v1.Event)
-				if err = p.processEvent(msg); err != nil {
-					log.Errorf("fail to process event: %v,  %v", msg, err)
+				if event.Object != nil {
+					msg := event.Object.(*v1.Event)
+					if err = p.processEvent(msg); err != nil {
+						log.Errorf("fail to process event: %v,  %v", msg, err)
+					}
 				}
+
 			}
 		}
 	}()
@@ -202,9 +205,6 @@ type LogConfig struct {
 
 // PodConfig pod configuration
 type PodConfig struct {
-	Namespace       string
-	PodName         string
-	PodUID          string
 	Container       v1.Container
 	ContainerStatus v1.ContainerStatus
 }
@@ -255,11 +255,11 @@ func (p *Pilot) processAllContainers() error {
 		return nil
 	}
 
-	podConfigs := make(map[string]*PodConfig)
 	for _, pod := range containers.Items {
 		if pod.Status.Phase != "Running" {
 			continue
 		}
+		podConfigs := make(map[string]*PodConfig)
 		for _, cs := range pod.Status.ContainerStatuses {
 			cs.ContainerID = strings.TrimPrefix(cs.ContainerID, "containerd://")
 			if p.exists(cs.ContainerID) {
