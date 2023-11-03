@@ -10,8 +10,8 @@ RUN go install
 
 FROM alpine:3.17
 
-ENV PILOT_DIR /go/src/github.com/shideqin/log-pilot
-COPY . $PILOT_DIR
+#ENV PILOT_DIR /go/src/github.com/shideqin/log-pilot
+#COPY . $PILOT_DIR
 
 #COPY assets/glibc/glibc-2.26-r0.apk /tmp/
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
@@ -22,7 +22,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
     apk add lsof && \
     apk add ca-certificates wget && \
     gem install fluentd -v 1.16.2 --no-document && \
-    gem install elasticsearch -v 7.10 --no-document && \s
+    gem install elasticsearch -v 7.10 --no-document && \
     gem install fluent-plugin-elasticsearch -v 2.12.5 --no-document && \
     gem install gelf -v "~> 3.0.0" --no-document && \
     gem install remote_syslog_logger -v ">=1.0.1" --no-document && \

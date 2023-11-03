@@ -7,7 +7,7 @@
   <parse>
   {{if .Stdout}}
   @type regexp
-  expression ^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$
+  expression ^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<message>.*)$
   time_key longtime
   {{else}}
   @type {{ .Format }}
