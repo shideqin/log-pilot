@@ -47,9 +47,9 @@ const (
 	//LABEL_SERVICE_SWARM_MODE                = "com.docker.swarm.service.name"
 	LABEL_K8S_POD_NAMESPACE  = "io.kubernetes.pod.namespace"
 	LABEL_K8S_CONTAINER_NAME = "io.kubernetes.container.name"
-	LABEL_POD_UID            = "io.kubernetes.pod.uid"
-	LABEL_POD                = "io.kubernetes.pod.name"
-	SYMLINK_LOGS_BASE        = "/acs/log/"
+	//LABEL_POD_UID            = "io.kubernetes.pod.uid"
+	LABEL_POD         = "io.kubernetes.pod.name"
+	SYMLINK_LOGS_BASE = "/acs/log/"
 
 	CONTAINERD_ROOTFS_PATH = "/var/run/containerd/io.containerd.runtime.v2.task/k8s.io/"
 	KUBERNETES_LOG_PATH    = "/var/log/pods/"
@@ -354,11 +354,11 @@ func container(labels map[string]string) map[string]string {
 	//putIfNotEmpty(c, "docker_app", labels[LABEL_PROJECT_SWARM_MODE])
 	//putIfNotEmpty(c, "docker_service", labels[LABEL_SERVICE])
 	//putIfNotEmpty(c, "docker_service", labels[LABEL_SERVICE_SWARM_MODE])
+	//putIfNotEmpty(c, "docker_container", fmt.Sprintf("k8s_%s_%s_%s_%s_0", labels[LABEL_K8S_CONTAINER_NAME], labels[LABEL_POD], labels[LABEL_K8S_POD_NAMESPACE], labels[LABEL_POD_UID]))
 	putIfNotEmpty(c, "k8s_pod", labels[LABEL_POD])
 	putIfNotEmpty(c, "k8s_pod_namespace", labels[LABEL_K8S_POD_NAMESPACE])
 	putIfNotEmpty(c, "k8s_container_name", labels[LABEL_K8S_CONTAINER_NAME])
 	putIfNotEmpty(c, "k8s_node_name", os.Getenv("NODE_NAME"))
-	putIfNotEmpty(c, "docker_container", fmt.Sprintf("k8s_%s_%s_%s_%s_0", labels[LABEL_K8S_CONTAINER_NAME], labels[LABEL_POD], labels[LABEL_K8S_POD_NAMESPACE], labels[LABEL_POD_UID]))
 	//extension(c, containerJSON)
 	return c
 }
@@ -369,7 +369,7 @@ func (p *Pilot) newContainer(ns, podName string, podUID types.UID, c v1.Containe
 	labels := map[string]string{}
 	labels[LABEL_K8S_POD_NAMESPACE] = ns
 	labels[LABEL_POD] = podName
-	labels[LABEL_POD_UID] = string(podUID)
+	//labels[LABEL_POD_UID] = string(podUID)
 	labels[LABEL_K8S_CONTAINER_NAME] = c.Name
 	jsonLogPath := fmt.Sprintf("%s%s_%s_%s/%s/%d.log", KUBERNETES_LOG_PATH, ns, podName, podUID, c.Name, cs.RestartCount)
 	//logConfig.containerDir match types.mountPoint
@@ -642,11 +642,11 @@ func (p *Pilot) parseLogConfig(containerId, name string, info *LogInfoNode, json
 		return nil, fmt.Errorf("%s must be a file path, not directory, for %s", pathStr, name)
 	}
 
-	//hostDir := p.hostDirOf(containerDir, mounts)
-	//if hostDir == "" {
-	//	return nil, fmt.Errorf("in log %s: %s is not mount on host", name, pathStr)
-	//}
-	hostDir := filepath.Join(CONTAINERD_ROOTFS_PATH, containerId, "rootfs")
+	hostDir := p.hostDirOf(containerDir, mounts)
+	if hostDir != "" {
+		return nil, fmt.Errorf("in log %s: %s is mount on host", name, pathStr)
+	}
+	hostDir = filepath.Join(CONTAINERD_ROOTFS_PATH, containerId, "rootfs")
 
 	cfg := &LogConfig{
 		Name:         name,
