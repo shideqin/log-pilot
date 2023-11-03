@@ -6,7 +6,10 @@
 
   <parse>
   {{if .Stdout}}
-  @type json
+  @type regexp
+  expression /^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$/
+  time_key longtime
+  time_format %Y-%m-%d %H:%M:%S %z
   {{else}}
   @type {{ .Format }}
   {{end}}
