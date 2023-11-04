@@ -165,7 +165,7 @@ func (p *Pilot) watch() error {
 			case event := <-events:
 				msg, ok := event.Object.(*v1.Event)
 				if !ok {
-					panic("could not cast event")
+					return
 				}
 				if err = p.processEvent(msg); err != nil {
 					log.Errorf("fail to process event: %v,  %v", msg, err)
