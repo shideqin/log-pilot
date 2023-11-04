@@ -140,8 +140,7 @@ func (p *Pilot) watch() error {
 
 	ctx := context.Background()
 	options := metav1.ListOptions{
-		TypeMeta: metav1.TypeMeta{Kind: "Pod"},
-		//FieldSelector: "metadata.name=xx",
+		FieldSelector: "involvedObject.kind=Pod",
 	}
 
 	watcher, err := p.client.CoreV1().Events(v1.NamespaceAll).Watch(ctx, options)
@@ -164,19 +163,19 @@ func (p *Pilot) watch() error {
 		for {
 			select {
 			case event := <-events:
-				if event.Object != nil {
-					msg := event.Object.(*v1.Event)
-					if err = p.processEvent(msg); err != nil {
-						log.Errorf("fail to process event: %v,  %v", msg, err)
-					}
+				msg, ok := event.Object.(*v1.Event)
+				if !ok {
+					panic("could not cast event")
 				}
-
+				if err = p.processEvent(msg); err != nil {
+					log.Errorf("fail to process event: %v,  %v", msg, err)
+				}
 			}
 		}
 	}()
 
 	time.Sleep(time.Second * 1)
-	if err := p.processAllContainers(); err != nil {
+	if err = p.processAllContainers(); err != nil {
 		return err
 	}
 
