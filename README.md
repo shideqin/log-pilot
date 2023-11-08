@@ -4,15 +4,14 @@ log-pilot
 [![CircleCI](https://circleci.com/gh/shideqin/log-pilot.svg?style=svg)](https://circleci.com/gh/shideqin/log-pilot)
 [![Go Report Card](https://goreportcard.com/badge/github.com/shideqin/log-pilot)](https://goreportcard.com/report/github.com/shideqin/log-pilot)
 
-`log-pilot` is an awesome docker log tool. With `log-pilot` you can collect logs from docker hosts and send them to your centralized log system such as elasticsearch, graylog2, awsog and etc. `log-pilot` can collect not only docker stdout but also log file that inside docker containers.
+`log-pilot` is an awesome container log tool. With `log-pilot` you can collect logs from kubernetes hosts and send them to your centralized log system such as elasticsearch, graylog2, awsog and etc. `log-pilot` can collect not only kubernetes stdout but also log file that inside kubernetes containers.
 
 Try it
 ======
 
 Prerequisites:
 
-- docker-compose >= 1.6
-- Docker Engine >= 1.10
+- kubeernetes >= 1.20
 
 ```
 # download log-pilot project
@@ -37,12 +36,78 @@ Quickstart
 ### Run pilot
 
 ```
-docker run --rm -it \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v /etc/localtime:/etc/localtime \
-    -v /:/host:ro \
-    --cap-add SYS_ADMIN \
-    registry.cn-hangzhou.aliyuncs.com/acs/log-pilot:0.9.5-filebeat
+# log-pilot.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    k8s-app: log-pilot
+  name: log-pilot
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      k8s-app: log-pilot
+  template:
+    metadata:
+      labels:
+        k8s-app: log-pilot
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: DoesNotExist
+              - key: type
+                operator: NotIn
+                values:
+                - virtual-kubelet
+      containers:
+      - env:
+        image: registry.cn-hangzhou.aliyuncs.com/ad-hub/log-pilot:v6.11.4.0
+        imagePullPolicy: Always
+        name: log-pilot
+        resources: {}
+        securityContext:
+          capabilities:
+            add:
+            - SYS_ADMIN
+        volumeMounts:
+        - mountPath: /host
+          name: root
+          readOnly: true
+        - mountPath: /etc/localtime
+          name: localtime
+        - mountPath: /etc/fluentd/fluentd.conf
+          name: vol-uviis
+          subPath: fluentd.conf
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: devops-admin
+      serviceAccountName: devops-admin
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/master
+      volumes:
+      - hostPath:
+          path: /
+          type: ""
+        name: root
+      - hostPath:
+          path: /etc/localtime
+          type: ""
+        name: localtime
+      - configMap:
+          name: log-pilot-config
+        name: vol-uviis
+
+#kubectl
+kubectl apply -f log-lipot.yaml
 ```
 
 ### Run applications whose logs need to be collected
@@ -64,8 +129,8 @@ More Info: [Fluentd Plugin](docs/fluentd/docs.md) and [Filebeat Plugin](docs/fil
 Feature
 ========
 
-- Support both [fluentd plugin](docs/fluentd/docs.md) and [filebeat plugin](docs/filebeat/docs.md). You don't need to create new fluentd or filebeat process for every docker container.
-- Support both stdout and log files. Either docker log driver or logspout can only collect stdout.
+- Support both [fluentd plugin](docs/fluentd/docs.md) and [filebeat plugin](docs/filebeat/docs.md). You don't need to create new fluentd or filebeat process for every kubernetes container.
+- Support both stdout and log files. Either kubernetes log driver or logspout can only collect stdout.
 - Declarative configuration. You need do nothing but declare the logs you want to collect.
 - Support many log management: elastichsearch, graylog2, awslogs and more.
 - Tags. You could add tags on the logs collected, and later filter by tags in log management.
@@ -75,13 +140,13 @@ Build log-pilot
 
 Prerequisites:
 
-- Go >= 1.6
+- Go >= 1.18
 
 ```
 go get github.com/shideqin/log-pilot
 cd $GOPATH/github.com/shideqin/log-pilot
 # This will create a new docker image named log-pilot:latest
-./build-image.sh
+./build-image.sh fluentd
 ```
 
 Contribute
