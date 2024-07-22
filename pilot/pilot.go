@@ -51,7 +51,7 @@ const (
 	LABEL_POD         = "io.kubernetes.pod.name"
 	SYMLINK_LOGS_BASE = "/acs/log/"
 
-	CONTAINERD_ROOTFS_PATH = "/var/run/containerd/io.containerd.runtime.v2.task/k8s.io/"
+	CONTAINERD_ROOTFS_PATH = "/run/containerd/io.containerd.runtime.v2.task/k8s.io/"
 	KUBERNETES_LOG_PATH    = "/var/log/pods/"
 
 	ERR_ALREADY_STARTED = "already started"
