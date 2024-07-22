@@ -24,7 +24,8 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
     apk add build-base ruby-dev && \
     apk add lsof && \
     apk add ca-certificates wget && \
-    gem sources --add https://mirrors.tuna.tsinghua.edu.cn/rubygems/ --remove https://rubygems.org/ && \
+    gem sources --add https://gems.ruby-china.com/ --remove https://rubygems.org/ && \
+    gem sources --update && \
     gem install fluentd -v 1.16.2 --no-document && \
     gem install elasticsearch -v 7.10 --no-document && \
     gem install fluent-plugin-elasticsearch -v 2.12.5 --no-document && \
