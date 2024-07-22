@@ -1,12 +1,15 @@
-FROM golang:1.20-alpine3.18 as builder
+FROM golang:1.22.2-alpine3.18 as builder
 
 ENV PILOT_DIR /go/src/github.com/shideqin/log-pilot
 ARG GOOS=linux
 ARG GOARCH=amd64
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
+    apk update
 RUN set -ex && apk add --no-cache make git
 WORKDIR $PILOT_DIR
 COPY . $PILOT_DIR
-RUN go install
+RUN go env -w GOPROXY=https://proxy.golang.com.cn,direct \
+  && go install
 
 FROM alpine:3.17
 
@@ -21,6 +24,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
     apk add build-base ruby-dev && \
     apk add lsof && \
     apk add ca-certificates wget && \
+    gem sources --add https://mirrors.tuna.tsinghua.edu.cn/rubygems/ --remove https://rubygems.org/ && \
     gem install fluentd -v 1.16.2 --no-document && \
     gem install elasticsearch -v 7.10 --no-document && \
     gem install fluent-plugin-elasticsearch -v 2.12.5 --no-document && \
