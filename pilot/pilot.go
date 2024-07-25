@@ -140,7 +140,7 @@ func (p *Pilot) watch() error {
 
 	ctx := context.Background()
 	options := metav1.ListOptions{
-		FieldSelector: "involvedObject.kind=Pod,spec.nodeName=" + os.Getenv("NODE_NAME"),
+		FieldSelector: "involvedObject.kind=Pod",
 	}
 	watcher, err := p.client.CoreV1().Events(v1.NamespaceAll).Watch(ctx, options)
 	if err != nil {
@@ -149,7 +149,9 @@ func (p *Pilot) watch() error {
 			return err
 		}
 	}
+	defer watcher.Stop()
 	events := watcher.ResultChan()
+	nodeName := os.Getenv("NODE_NAME")
 
 	go func() {
 		defer func() {
@@ -163,7 +165,7 @@ func (p *Pilot) watch() error {
 			select {
 			case event := <-events:
 				if msg, ok := event.Object.(*v1.Event); ok {
-					if err = p.processEvent(msg); err != nil {
+					if err = p.processEvent(nodeName, msg); err != nil {
 						log.Errorf("fail to process event: %v,  %v", msg, err)
 					}
 				}
@@ -172,7 +174,7 @@ func (p *Pilot) watch() error {
 	}()
 
 	time.Sleep(time.Second * 1)
-	if err = p.processAllContainers(); err != nil {
+	if err = p.processAllContainers(nodeName); err != nil {
 		return err
 	}
 
@@ -236,14 +238,15 @@ func (p *Pilot) cleanConfigs() error {
 	return nil
 }
 
-func (p *Pilot) processAllContainers() error {
+func (p *Pilot) processAllContainers(nodeName string) error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 
 	log.Debug("process all container log config")
 
-	opts := metav1.ListOptions{
-		FieldSelector: "spec.nodeName=" + os.Getenv("NODE_NAME"),
+	opts := metav1.ListOptions{}
+	if nodeName != "" {
+		opts.FieldSelector = "spec.nodeName=" + nodeName
 	}
 	containers, err := p.client.CoreV1().Pods(v1.NamespaceAll).List(context.Background(), opts)
 	if err != nil {
@@ -460,7 +463,7 @@ func (p *Pilot) delContainer(id string) error {
 	return p.piloter.OnDestroyEvent(id)
 }
 
-func (p *Pilot) processEvent(msg *v1.Event) error {
+func (p *Pilot) processEvent(nodeName string, msg *v1.Event) error {
 	switch msg.Reason {
 	case "Started":
 		log.Debugf("Process container start event: %s", msg.InvolvedObject.Name)
@@ -473,6 +476,10 @@ func (p *Pilot) processEvent(msg *v1.Event) error {
 		pod, err := p.client.CoreV1().Pods(msg.InvolvedObject.Namespace).Get(context.Background(), msg.InvolvedObject.Name, metav1.GetOptions{})
 		if err != nil {
 			return err
+		}
+
+		if nodeName != "" && nodeName != pod.Spec.NodeName {
+			return fmt.Errorf("%s is not running on this node", msg.InvolvedObject.Name)
 		}
 
 		return p.newContainer(msg.InvolvedObject.Namespace, msg.InvolvedObject.Name, msg.InvolvedObject.UID, pod.Spec.Containers[0], pod.Status.ContainerStatuses[0])
