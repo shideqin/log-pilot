@@ -162,12 +162,10 @@ func (p *Pilot) watch() error {
 		for {
 			select {
 			case event := <-events:
-				msg, ok := event.Object.(*v1.Event)
-				if !ok {
-					continue
-				}
-				if err = p.processEvent(msg); err != nil {
-					log.Errorf("fail to process event: %v,  %v", msg, err)
+				if msg, ok := event.Object.(*v1.Event); ok {
+					if err = p.processEvent(msg); err != nil {
+						log.Errorf("fail to process event: %v,  %v", msg, err)
+					}
 				}
 			}
 		}
