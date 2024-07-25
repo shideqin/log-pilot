@@ -140,9 +140,8 @@ func (p *Pilot) watch() error {
 
 	ctx := context.Background()
 	options := metav1.ListOptions{
-		FieldSelector: "involvedObject.kind=Pod",
+		FieldSelector: "involvedObject.kind=Pod,spec.nodeName=" + os.Getenv("NODE_NAME"),
 	}
-
 	watcher, err := p.client.CoreV1().Events(v1.NamespaceAll).Watch(ctx, options)
 	if err != nil {
 		log.Warnf("error: %v", err)
@@ -165,7 +164,7 @@ func (p *Pilot) watch() error {
 			case event := <-events:
 				msg, ok := event.Object.(*v1.Event)
 				if !ok {
-					return
+					continue
 				}
 				if err = p.processEvent(msg); err != nil {
 					log.Errorf("fail to process event: %v,  %v", msg, err)
@@ -246,7 +245,7 @@ func (p *Pilot) processAllContainers() error {
 	log.Debug("process all container log config")
 
 	opts := metav1.ListOptions{
-		//FieldSelector: "metadata.name=xx",
+		FieldSelector: "spec.nodeName=" + os.Getenv("NODE_NAME"),
 	}
 	containers, err := p.client.CoreV1().Pods(v1.NamespaceAll).List(context.Background(), opts)
 	if err != nil {
@@ -637,7 +636,7 @@ func (p *Pilot) parseLogConfig(containerId, name string, info *LogInfoNode, json
 
 	containerDir := filepath.Dir(pathStr)
 	file := filepath.Base(pathStr)
-	if file == "" {
+	if file == "" || !strings.Contains(file, ".log") {
 		return nil, fmt.Errorf("%s must be a file path, not directory, for %s", pathStr, name)
 	}
 
