@@ -11,6 +11,7 @@ import (
 	//"github.com/docker/docker/api/types"
 	log "github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -164,10 +165,15 @@ func (p *Pilot) watch() error {
 		for {
 			select {
 			case event := <-events:
-				if msg, ok := event.Object.(*v1.Event); ok {
-					if err = p.processEvent(nodeName, msg); err != nil {
-						log.Errorf("fail to process event: %v,  %v", msg, err)
-					}
+				if event.Type != "ADDED" {
+					continue
+				}
+				msg, ok := event.Object.(*v1.Event)
+				if !ok {
+					continue
+				}
+				if err = p.processEvent(nodeName, msg); err != nil {
+					log.Errorf("fail to process event: %v,  %v", msg, err)
 				}
 			}
 		}
@@ -258,43 +264,46 @@ func (p *Pilot) processAllContainers(nodeName string) error {
 		if pod.Status.Phase != "Running" {
 			continue
 		}
-		podConfigs := make(map[string]*PodConfig)
-		for _, cs := range pod.Status.ContainerStatuses {
-			cs.ContainerID = strings.TrimPrefix(cs.ContainerID, "containerd://")
-			if p.exists(cs.ContainerID) {
-				log.Debugf("%s is already exists", cs.ContainerID)
-				continue
-			}
-			podConfigs[cs.Name] = &PodConfig{
-				ContainerStatus: cs,
-			}
-		}
-		for _, c := range pod.Spec.Containers {
-			if _, ok := podConfigs[c.Name]; !ok {
-				continue
-			}
-			podConfigs[c.Name].Container = c
-		}
-		for _, podConfig := range podConfigs {
-			if err = p.newContainer(pod.Namespace, pod.Name, pod.UID, podConfig.Container, podConfig.ContainerStatus); err != nil {
-				log.Errorf("fail to process container %s: %v", podConfig.Container.Name, err)
-			}
-		}
+		p.processContainer(pod)
 	}
-
 	//return p.processSymlink(containerIDs)
 	return nil
 }
 
-func (p *Pilot) processSymlink(existingContainerIDs map[string]string) error {
-	symlinkContainerIDs := p.listAllSymlinkContainer()
-	for containerID := range symlinkContainerIDs {
-		if _, ok := existingContainerIDs[containerID]; !ok {
-			_ = p.removeVolumeSymlink(containerID)
+func (p *Pilot) processContainer(pod v1.Pod) {
+	podConfigs := make(map[string]*PodConfig)
+	for _, cs := range pod.Status.ContainerStatuses {
+		cs.ContainerID = strings.TrimPrefix(cs.ContainerID, "containerd://")
+		if p.exists(cs.ContainerID) {
+			log.Debugf("%s is already exists", cs.ContainerID)
+			continue
+		}
+		podConfigs[cs.Name] = &PodConfig{
+			ContainerStatus: cs,
 		}
 	}
-	return nil
+	for _, c := range pod.Spec.Containers {
+		if _, ok := podConfigs[c.Name]; !ok {
+			continue
+		}
+		podConfigs[c.Name].Container = c
+	}
+	for _, podConfig := range podConfigs {
+		if err := p.newContainer(pod.Namespace, pod.Name, pod.UID, podConfig.Container, podConfig.ContainerStatus); err != nil {
+			log.Errorf("fail to process container %s(%s): %v", podConfig.Container.Name, podConfig.ContainerStatus.ContainerID, err)
+		}
+	}
 }
+
+//func (p *Pilot) processSymlink(existingContainerIDs map[string]string) error {
+//	symlinkContainerIDs := p.listAllSymlinkContainer()
+//	for containerID := range symlinkContainerIDs {
+//		if _, ok := existingContainerIDs[containerID]; !ok {
+//			_ = p.removeVolumeSymlink(containerID)
+//		}
+//	}
+//	return nil
+//}
 
 func (p *Pilot) listAllSymlinkContainer() map[string]string {
 	containerIDs := make(map[string]string)
@@ -465,31 +474,35 @@ func (p *Pilot) delContainer(id string) error {
 
 func (p *Pilot) processEvent(nodeName string, msg *v1.Event) error {
 	switch msg.Reason {
-	case "Started":
-		log.Debugf("Process container start event: %s", msg.InvolvedObject.Name)
-
-		if p.exists(string(msg.InvolvedObject.UID)) {
-			log.Debugf("%s is already exists", msg.InvolvedObject.UID)
-			return nil
-		}
-
+	case "Started", "Killing":
+	RETRY:
 		pod, err := p.client.CoreV1().Pods(msg.InvolvedObject.Namespace).Get(context.Background(), msg.InvolvedObject.Name, metav1.GetOptions{})
 		if err != nil {
-			return err
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			time.Sleep(1 * time.Second)
+			goto RETRY
 		}
-
+		if pod.Status.Phase != "Running" {
+			time.Sleep(1 * time.Second)
+			goto RETRY
+		}
 		if nodeName != "" && nodeName != pod.Spec.NodeName {
 			return fmt.Errorf("%s is not running on this node", msg.InvolvedObject.Name)
 		}
-
-		return p.newContainer(msg.InvolvedObject.Namespace, msg.InvolvedObject.Name, msg.InvolvedObject.UID, pod.Spec.Containers[0], pod.Status.ContainerStatuses[0])
-	//Increase the monitoring of container Exit events and repair the log duplicate collection caused by the failure to delete the exited container in time
-	case "Killing":
-		log.Debugf("Process container destroy event: %s", msg.InvolvedObject.UID)
-
-		err := p.delContainer(string(msg.InvolvedObject.UID))
-		if err != nil {
-			log.Warnf("Process container destroy event error: %s, %s", msg.InvolvedObject.UID, err.Error())
+		if msg.Reason == "Started" {
+			log.Debugf("Process container start event: %s", msg.InvolvedObject.Name)
+			p.processContainer(*pod)
+		} else {
+			for _, cs := range pod.Status.ContainerStatuses {
+				cs.ContainerID = strings.TrimPrefix(cs.ContainerID, "containerd://")
+				log.Debugf("Process container destroy event: %s(%s)", msg.InvolvedObject.Name, cs.ContainerID)
+				err = p.delContainer(cs.ContainerID)
+				if err != nil {
+					log.Warnf("Process container destroy event error: %s(%s), %s", msg.InvolvedObject.Name, cs.ContainerID, err.Error())
+				}
+			}
 		}
 	}
 	return nil
@@ -810,72 +823,72 @@ func (p *Pilot) reload() error {
 	return err
 }
 
-func (p *Pilot) createVolumeSymlink(labels map[string]string) error {
-	if !p.createSymlink {
-		return nil
-	}
+//func (p *Pilot) createVolumeSymlink(labels map[string]string) error {
+//	if !p.createSymlink {
+//		return nil
+//	}
+//
+//	//linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
+//	//if _, err := os.Stat(linkBaseDir); err != nil && os.IsNotExist(err) {
+//	//	if err := os.MkdirAll(linkBaseDir, 0777); err != nil {
+//	//		log.Errorf("create %s error: %v", linkBaseDir, err)
+//	//	}
+//	//}
+//	//
+//	//applicationInfo := container(labels)
+//	//containerLinkBaseDir := path.Join(linkBaseDir, applicationInfo["docker_app"], applicationInfo["docker_service"], containerJSON.ID)
+//	//symlinks := make(map[string]string)
+//	//for _, mountPoint := range containerJSON.Mounts {
+//	//	if mountPoint.Type != mount.TypeVolume {
+//	//		continue
+//	//	}
+//	//
+//	//	volume, err := p.client.VolumeInspect(context.Background(), mountPoint.Name)
+//	//	if err != nil {
+//	//		log.Errorf("inspect volume %s error: %v", mountPoint.Name, err)
+//	//		continue
+//	//	}
+//	//
+//	//	symlink := path.Join(containerLinkBaseDir, volume.Name)
+//	//	if _, ok := symlinks[volume.Mountpoint]; !ok {
+//	//		symlinks[volume.Mountpoint] = symlink
+//	//	}
+//	//}
+//	//
+//	//if len(symlinks) == 0 {
+//	//	return nil
+//	//}
+//	//
+//	//if _, err := os.Stat(containerLinkBaseDir); err != nil && os.IsNotExist(err) {
+//	//	if err := os.MkdirAll(containerLinkBaseDir, 0777); err != nil {
+//	//		log.Errorf("create %s error: %v", containerLinkBaseDir, err)
+//	//		return err
+//	//	}
+//	//}
+//	//
+//	//for mountPoint, symlink := range symlinks {
+//	//	err := os.Symlink(mountPoint, symlink)
+//	//	if err != nil && !os.IsExist(err) {
+//	//		log.Errorf("create symlink %s error: %v", symlink, err)
+//	//	}
+//	//}
+//	return nil
+//}
 
-	//linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
-	//if _, err := os.Stat(linkBaseDir); err != nil && os.IsNotExist(err) {
-	//	if err := os.MkdirAll(linkBaseDir, 0777); err != nil {
-	//		log.Errorf("create %s error: %v", linkBaseDir, err)
-	//	}
-	//}
-	//
-	//applicationInfo := container(labels)
-	//containerLinkBaseDir := path.Join(linkBaseDir, applicationInfo["docker_app"], applicationInfo["docker_service"], containerJSON.ID)
-	//symlinks := make(map[string]string)
-	//for _, mountPoint := range containerJSON.Mounts {
-	//	if mountPoint.Type != mount.TypeVolume {
-	//		continue
-	//	}
-	//
-	//	volume, err := p.client.VolumeInspect(context.Background(), mountPoint.Name)
-	//	if err != nil {
-	//		log.Errorf("inspect volume %s error: %v", mountPoint.Name, err)
-	//		continue
-	//	}
-	//
-	//	symlink := path.Join(containerLinkBaseDir, volume.Name)
-	//	if _, ok := symlinks[volume.Mountpoint]; !ok {
-	//		symlinks[volume.Mountpoint] = symlink
-	//	}
-	//}
-	//
-	//if len(symlinks) == 0 {
-	//	return nil
-	//}
-	//
-	//if _, err := os.Stat(containerLinkBaseDir); err != nil && os.IsNotExist(err) {
-	//	if err := os.MkdirAll(containerLinkBaseDir, 0777); err != nil {
-	//		log.Errorf("create %s error: %v", containerLinkBaseDir, err)
-	//		return err
-	//	}
-	//}
-	//
-	//for mountPoint, symlink := range symlinks {
-	//	err := os.Symlink(mountPoint, symlink)
-	//	if err != nil && !os.IsExist(err) {
-	//		log.Errorf("create symlink %s error: %v", symlink, err)
-	//	}
-	//}
-	return nil
-}
-
-func (p *Pilot) removeVolumeSymlink(containerId string) error {
-	if !p.createSymlink {
-		return nil
-	}
-
-	//linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
-	//containerLinkDirs, _ := filepath.Glob(path.Join(linkBaseDir, "*", "*", containerId))
-	//if containerLinkDirs == nil {
-	//	return nil
-	//}
-	//for _, containerLinkDir := range containerLinkDirs {
-	//	if err := os.RemoveAll(containerLinkDir); err != nil {
-	//		log.Warnf("remove error: %v", err)
-	//	}
-	//}
-	return nil
-}
+//func (p *Pilot) removeVolumeSymlink(containerId string) error {
+//	if !p.createSymlink {
+//		return nil
+//	}
+//
+//	//linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
+//	//containerLinkDirs, _ := filepath.Glob(path.Join(linkBaseDir, "*", "*", containerId))
+//	//if containerLinkDirs == nil {
+//	//	return nil
+//	//}
+//	//for _, containerLinkDir := range containerLinkDirs {
+//	//	if err := os.RemoveAll(containerLinkDir); err != nil {
+//	//		log.Warnf("remove error: %v", err)
+//	//	}
+//	//}
+//	return nil
+//}
